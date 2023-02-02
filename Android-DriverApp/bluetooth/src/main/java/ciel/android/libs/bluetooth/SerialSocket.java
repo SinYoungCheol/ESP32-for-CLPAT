@@ -16,9 +16,13 @@ import android.content.IntentFilter;
 import android.util.Log;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.Buffer;
 import java.security.InvalidParameterException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
@@ -75,11 +79,13 @@ class SerialSocket implements Runnable {
         }
 
         in_connection = true;
-        byte[] buffer = new byte[1024];
+        byte[] buffer = new byte[256];
         int rxSize = 0, rxPosition = 0;
 
-        // 패킷의 마지막 (2 byte)는  '\r\n'
+        // 가정 : 버퍼에는 하나의 패킷에 다수의 메시지가 있다.
+        // 하나의 메시지의 끝은 '\r', '\n' 으로 식별한다.
         try {
+            // int debug_path = 1;
             while (in_connection) {
                 if (mSocket.getInputStream() == null) {
                     continue;
@@ -89,69 +95,71 @@ class SerialSocket implements Runnable {
                     continue;
                 }
 
-                if (rxPosition >= buffer.length) { // 다음읽기 위치가 버퍼크기를 초과 ?
+                if (rxPosition >= buffer.length) { // 다음읽기 위치가 버퍼 크기를 초과 ?
                     rxPosition = 0;
                     Arrays.fill(buffer, (byte)0);
                 }
 
                 rxSize = mSocket.getInputStream().read(buffer, rxPosition, buffer.length - rxPosition);
+              /* 패킷의 파편화 처리에 대한 디버깅용 코드 조각
+              *  debug_path = 1 : 1차 시도 (후미에 ETX 가 없는 패킷을 버퍼에 강제 할당)
+              *  debug_path = 2 : 2차 시도 (1차 시도의 나머지 패킷을 강제 할당), 이때 debug_path 는 강제로 2로 할당하여 흐름을 변경해야 한다.
+              *
+                if (debug_path == 1) {
+                    rxPosition = 0;
+                    String sample = "12345\r\n67890\r\nABCDE";
+                    byte[] tmp = Arrays.copyOfRange(sample.getBytes(), 0, sample.length());
+                    Arrays.fill(buffer, (byte)0);
+                    for(int k=0;k<tmp.length;k++) { buffer[k] = tmp[k];}
+                    rxSize = tmp.length;
+                }
+                else if (debug_path == 2) {
+                    String sample = "FGH\r\n";
+                    byte[] tmp = Arrays.copyOfRange(sample.getBytes(), 0, sample.length());
+                    for(int k=0;k<tmp.length;k++) { buffer[rxPosition + k] = tmp[k];}
+                    rxSize = tmp.length;
+                }
+             */
                 if (rxSize == 0) { // 읽은 데이터가 없는 경우
                     Log.e("SerialSocket", "rxSize=" + rxSize);
                     continue;
                 }
 
-
-                String strBuff = (new String(buffer, 0, rxPosition + rxSize));
-                String[] messages = strBuff.split("\n");
-                for(String msg : messages) {
-                    if (mListener != null) {
-                        int cr_index = msg.lastIndexOf('\r');
-                        if (cr_index != -1) {
-                            mListener.onSerialRead(msg.substring(0, cr_index - 1).getBytes());
-                        }
-                    }
-                }
-
-                // STX 위치는 읽기의 시작위치
-                int stx_index = 0;
-                // ETX 탐색은 항상 버퍼의 rxPosition 위치부터 시작
-                int etx_index = strBuff.indexOf('\r', stx_index);
-                //int etx_index = Arrays.binarySearch(buffer, stx_index, rxSize, (byte)0x0d);
-                if (etx_index == -1) { // CR (Carriage Return)이 없는 경우 다음 스트림을 읽기
+                // 실제 수신한 데이터만을 복사
+                String strBuff = new String(buffer, 0, rxPosition + rxSize);
+                // (ETX)가 탐색되지 않으면 다음 패킷을 읽는다.
+                if (strBuff.indexOf('\r') == -1) {
                     rxPosition += rxSize;
                     continue;
                 }
 
-                // 패킷에는 하나 이상의 메시지가 있을 수 있다.
-                while(etx_index != -1) {
-                    int msg_size = etx_index - stx_index;
-                    byte[] rxBytes = strBuff.substring(stx_index, etx_index).getBytes();
-                    if (mListener != null) {
-                        mListener.onSerialRead(rxBytes);
-                    }
-
-                    if (etx_index >= msg_size) {
-                        etx_index = -1;
+                // 하나 이상의 메시지가 있을 수 있으므로 분할하여 각 메시지별로 처리
+                String[] messages = strBuff.split("\\n");
+                int etx_index = -1;
+                for(String msg : messages) {
+                    etx_index = msg.lastIndexOf('\r');
+                    if (etx_index == -1) { // 메시지 중 (ETX)가 없는 경우
+                        // 처리하지 못한 잔여 메시지를 버퍼로 옮긴다.
+                        // 1. 버퍼를 클리어
+                        Arrays.fill(buffer, (byte)0);
+                        // 2. 잔여 메시지를 버퍼의 선두에 배치 
+                        byte[] remainder = msg.getBytes();
+                        System.arraycopy(remainder, 0, buffer, 0, remainder.length);
+                        // 3. 수신위치를 잔여 메시지의 끝에 위치시킴
+                        rxPosition = remainder.length;
                         break;
                     }
-                    // STX 위치는 이전 etx 위치에서 개행문자 길이만큼 합한 위치
-                    stx_index = strBuff.substring(etx_index + 1, 1).equals("\n") ? etx_index + 2 : etx_index + 1;
-                    // ETX 탐색은 항상 버퍼의 rxPosition 위치부터 시작
-                    etx_index = strBuff.indexOf('\r', stx_index);
-                }
 
-                if (stx_index <= (rxPosition + rxSize) - 1) { // 잔여 파편이 남아있으면
-                    int remainder_size = (rxPosition + rxSize) - stx_index;
-                    byte[] remainder_bytes = Arrays.copyOfRange(buffer, stx_index, stx_index + remainder_size -1);
-                    Arrays.fill(buffer, (byte)0);
-                    buffer = Arrays.copyOfRange(remainder_bytes, 0, remainder_size);
-                    Log.v("SerialSocket", "dump buffer[]=" + new String(buffer));
-                    rxPosition = remainder_size;
+                    msg = msg.substring(0, etx_index);
+                    if (mListener != null) {
+                        mListener.onSerialRead(msg.getBytes());
+                    }
                 }
-                else {
+                if (etx_index != -1) {
+                    // 패킷내의 모든 메시지를 처리한 경우
                     rxPosition = 0;
-                    Arrays.fill(buffer, (byte)0);
-                }
+                    Arrays.fill(buffer, (byte) 0);
+                } // ETX 탐색 실패이면 다음 패킷 읽기
             }
         } catch (Exception e) {
             in_connection = false;
