@@ -1,7 +1,8 @@
 # ESP32-for-CLPAT
 ESP32 DevKit 보드를 이용하여 탑승자 승차권 식별기 제작
 
-#폴더 설명
+# 폴더 설명
+<p>
  1. Android-DriverApp
     가. OS       : 안드로이드
     나. Language : java 
@@ -12,3 +13,4 @@ ESP32 DevKit 보드를 이용하여 탑승자 승차권 식별기 제작
         4) 인증 작업의 결과를 TTS를 이용, 탑승자에게 안내하고 원격 서버로 전송한다.
         5) 일정 주기로 수집한 GPS 데이터를 원격 서버로 전송한다.
  2. Arduino-ESP32
+ </p>
